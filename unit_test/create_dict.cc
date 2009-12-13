@@ -66,6 +66,13 @@ void u16string2string(const std::u16string& src, std::string& des)
   }
 }
 
+std::string u16string2string(const std::u16string& src)
+{
+  std::string des;
+  u16string2string(src, des);
+  return des;
+}
+
 ///这里尝试建立一个内存中的字典，并且序列话输出，以后用的时候
 //直接序列化读入内存,格式是这样的一个数组，每一个对应一个汉字，
 //数组的元素是哈希表，如字 兰，去数组直接索引得到数组位置，再
@@ -227,21 +234,32 @@ void test_sentence_iter()
   ifs.close();
 }
 
+void print_chunk(const std::u16string& sentence, const std::vector<int>& chunk_vec)
+{
+  using namespace std;
+  int start = 0;
+  for (int j = 0; j < chunk_vec.size(); j++) {
+    cout << u16string2string(sentence.substr(start, chunk_vec[j])) << "$";
+    start += chunk_vec[j];
+  }
+
+  if (start < sentence.size())
+    cout << u16string2string(sentence.substr(start, sentence.size() - start)) << "$";
+  
+  cout << endl;
+}
 
 //s start, e end,
+//TODO 有必要改为非递归？
 void do_split_word(const std::u16string& sentence, int s, int e,
                    WordHashMap hash_array[], 
                    std::vector<std::vector<int> >& chunk_vecs, 
                    std::vector<int>& chunk_vec) 
 {
-  if (s == e) {
-    chunk_vecs.push_back(chunk_vec);
-    return;
-  }
-  
   //如果这个单字不构成任何词,包括它自身(新字:))
-  if (hash_array[index_map(sentence[s])].empty()) {
-    cout << "new word??" << endl;
+  int index = index_map(sentence[s]);
+  if ( (index < 0) || (index >= CJKSIZE + SYMBOLNUM) ||  hash_array[index].empty()) {
+    //cout << "new word??" << endl;
     chunk_vec.push_back(1);
     do_split_word(sentence, s+1, e, hash_array, chunk_vecs, chunk_vec);
     chunk_vec.pop_back();
@@ -249,17 +267,42 @@ void do_split_word(const std::u16string& sentence, int s, int e,
   }
 
   std::u16string str;
-  for (int i = s; i < e; i++) {
+  int i;
+  for (i = s; i < e; i++) {
     str.push_back(sentence[i]);
-    auto iter = hash_array[index_map(sentence[s])].find(str);
-    if (iter != hash_array[index_map(sentence[s])].end()) {
+    auto iter = hash_array[index].find(str);
+    if (iter != hash_array[index].end()) {
       chunk_vec.push_back(i - s + 1);
-      do_split_word(sentence, i+1, e, hash_array, chunk_vecs, chunk_vec);
+     
+      if (i + 1 < e)
+        do_split_word(sentence, i+1, e, hash_array, chunk_vecs, chunk_vec);
+      //if (i+1 < e) {
+      //  do_split_word(sentence, i+1, e, hash_array, chunk_vecs, chunk_vec);
+      //} 
+      else {
+        chunk_vecs.push_back(chunk_vec);
+        chunk_vec.pop_back();
+        return;
+      }
+      
       chunk_vec.pop_back();
-    }
+    } 
+    //else {
+    //  if (i+1 == e)
+    //    chunk_vecs.push_back(chunk_vec);
+    //}
   }
+
+  //chunk_vec.push_back(str.size());
+  chunk_vecs.push_back(chunk_vec);
+  //chunk_vec.pop_back();
 }
 
+
+inline int get_total_length(const std::vector<int>& chunk_vec)
+{
+  return std::accumulate(chunk_vec.begin(), chunk_vec.end(), 0);
+}
 inline double get_avg_length(const std::vector<int>& chunk_vec) 
 {
   return std::accumulate(chunk_vec.begin(), chunk_vec.end(), 0) /(double)chunk_vec.size();
@@ -279,12 +322,16 @@ inline double get_variance(const std::vector<int>& chunk_vec)
 
 struct ChunkInfo {
   int index;
+
+  int total_length;
   double avg_length;
   double avg_variance;
 
   bool operator < ( const ChunkInfo &other ) const {
       //if not equal
-      if ( (avg_length - other.avg_length) > 0.00000001 || (other.avg_length -avg_length) > 0.00000001)
+      if (total_length != other.total_length)
+        return total_length < other.total_length;
+      else if ( (avg_length - other.avg_length) > 0.00000001 || (other.avg_length -avg_length) > 0.00000001)
         return avg_length < other.avg_length;
       else 
         return avg_variance > other.avg_variance;
@@ -297,13 +344,14 @@ int find_best_chunk(const std::vector<std::vector<int> >& chunk_vecs)
   //typedef std::deque<int> HuffDQU;   
   //typedef std::priority_queue<int, HuffDQU, HuffNodeIndexGreater>  HuffPRQUE; 
 
-   std::priority_queue<ChunkInfo> candidates;
+  std::priority_queue<ChunkInfo> candidates;
 
   double min_avg_variance = 1;
   ChunkInfo cinfo;
   //TODO speed up
   for (int i = 0; i < chunk_vecs.size(); i++) {
     cinfo.index = i;
+    cinfo.total_length = get_total_length(chunk_vecs[i]);
     cinfo.avg_length = get_avg_length(chunk_vecs[i]);
     cinfo.avg_variance = get_variance(chunk_vecs[i]);
     candidates.push(cinfo);
@@ -312,6 +360,7 @@ int find_best_chunk(const std::vector<std::vector<int> >& chunk_vecs)
   //cout << candidates.top().avg_length << endl;
   return candidates.top().index;
 }
+
 
 void split_word(const std::u16string& sentence, WordHashMap hash_array[]) 
 {
@@ -329,30 +378,13 @@ void split_word(const std::u16string& sentence, WordHashMap hash_array[])
 
 ////#ifdef DEBUG
 //  //检查各个chunk的划分情况
-//   for (int i = 0; i < chunk_vecs.size(); i++) {
-//    int s = 0;
-//    for (int j = 0; j < chunk_vecs[i].size(); j++) {
-//      //cout << "*" << chunk_vecs[i][j] << " " << s << " " << chunk_vecs[i][j] <<" ";
-//
-//      u16string2string(sentence.substr(s, chunk_vecs[i][j]), str);
-//      cout << str << "$";
-//      s += chunk_vecs[i][j];
-//    }
-//    cout << endl;
+//  for (int i = 0; i < chunk_vecs.size(); i++) {
+//    print_chunk(sentence, chunk_vecs[i]);
 //  }
 ////#endif
-//
   //显示分词结果
   int best_chunck_index = find_best_chunk(chunk_vecs);
-    int start = 0;
-    for (int j = 0; j < chunk_vecs[best_chunck_index].size(); j++) {
-      //cout << "*" << chunk_vecs[i][j] << " " << s << " " << chunk_vecs[i][j] <<" ";
-      u16string2string(sentence.substr(start, chunk_vecs[best_chunck_index][j]), str);
-      cout << str << "$";
-      start += chunk_vecs[best_chunck_index][j];
-    }
-    cout << endl;
-
+  print_chunk(sentence, chunk_vecs[best_chunck_index]);
 }
 
 void word_segment()
@@ -386,6 +418,11 @@ TEST(test_dict, perf)
   //split_word((const char16_t*)L"研究生命起源", hash_array); //这里注意需要转换而且要改编译选项-fshort-wchar不然4byte一个字符
   //split_word((const char16_t*)L"起源", hash_array);
   //split_word((const char16_t*)L"街巷背阴的地方", hash_array);
+  split_word((const char16_t*)L"隐隐约约", hash_array);
+  split_word((const char16_t*)L"隐隐约约听见远处传来一阵叮叮咣咣的声音", hash_array);
+  
+  //split_word((const char16_t*)L"他好象隐隐约约听见远处传来一阵“叮叮咣咣”的声音", hash_array);
+  split_word((const char16_t*)L"火水", hash_array);
   word_segment();
 }
 
